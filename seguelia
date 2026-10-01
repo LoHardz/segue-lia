@@ -1,0 +1,851 @@
+// =====================================================
+// SEGUIDOR DE LINHA - 5 SENSORES
+//
+// VERSÃO:
+// - RETA ESTÁVEL
+// - CURVAS FECHADAS AGRESSIVAS
+// - RÉ LEVE NO MOTOR INTERNO
+// - RECUPERAÇÃO RÁPIDA DA LINHA
+// =====================================================
+
+
+// =======================
+// PINOS DOS MOTORES
+// =======================
+
+const int IN1 = 4;
+const int IN2 = 7;
+const int IN3 = 8;
+const int IN4 = 12;
+
+const int ENA = 5; // motor direito
+const int ENB = 6; // motor esquerdo
+
+
+// =======================
+// SENSORES DE LINHA
+// =======================
+
+const int IRL2  = A0;
+const int IRL1  = A1;
+const int IRMID = A2;
+const int IRR1  = A3;
+const int IRR2  = A4;
+
+const int IRBACK = 3;
+
+
+// =======================
+// BOTÃO
+// =======================
+
+const int START_BUTTON = 2;
+
+
+// =======================
+// CONFIGURAÇÕES
+// =======================
+
+const int SENSOR_ATIVO = LOW;
+
+
+// =======================
+// VELOCIDADES
+// =======================
+
+// Reta
+int baseSpeed = 180;
+
+// Máximo
+int maxSpeed = 250;
+
+
+// Curva EXTREMA
+//
+// Motor externo vai forte
+// Motor interno entra em ré leve
+
+int strongCurveOuter = 240;
+
+int strongCurveInner = 80;
+
+
+// Quando perde totalmente a linha
+int searchForward = 150;
+int searchReverse = 100;
+
+
+// =======================
+// PID
+// =======================
+//
+// PID fica responsável principalmente
+// pelas correções pequenas e médias.
+//
+
+float Kp = 40.0;
+
+float Ki = 0.0;
+
+float Kd = 0.0;
+
+
+// =======================
+// SENSOR TRASEIRO
+// =======================
+
+unsigned long startTime = 0;
+
+unsigned long delayIRBack = 19800;
+
+unsigned long delayParadaBack = 300;
+
+bool paradoPeloSensorBack = false;
+
+bool roboLiberado = false;
+
+
+// =======================
+// VARIÁVEIS
+// =======================
+
+float erro = 0;
+
+float erroAnterior = 0;
+
+float integral = 0;
+
+float ultimoErroValido = 0;
+
+
+// =======================
+// ESTADO DOS SENSORES
+// =======================
+
+bool estadoSensores[5];
+
+
+// =======================
+// PESOS
+// =======================
+
+float pesos[5] = {
+
+  -2.0,
+  -1.0,
+   0.0,
+   1.0,
+   2.0
+
+};
+
+
+// =======================
+// PINOS DOS SENSORES
+// =======================
+
+int sensores[5] = {
+
+  IRL2,
+  IRL1,
+  IRMID,
+  IRR1,
+  IRR2
+
+};
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+
+
+  // =======================
+  // MOTORES
+  // =======================
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+
+  // =======================
+  // SENSORES
+  // =======================
+
+  pinMode(IRL2, INPUT);
+  pinMode(IRL1, INPUT);
+
+  pinMode(IRMID, INPUT);
+
+  pinMode(IRR1, INPUT);
+  pinMode(IRR2, INPUT);
+
+  pinMode(IRBACK, INPUT);
+
+
+  // =======================
+  // BOTÃO
+  // =======================
+
+  pinMode(START_BUTTON, INPUT_PULLUP);
+
+
+  stopMotors();
+
+
+  // =======================
+  // ESPERA BOTÃO
+  // =======================
+
+  while (digitalRead(START_BUTTON) == HIGH) {
+
+    stopMotors();
+
+  }
+
+
+  // =======================
+  // ESPERA 5 SEGUNDOS
+  // =======================
+
+  delay(5000);
+
+
+  startTime = millis();
+
+  roboLiberado = true;
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop() {
+
+
+  if (!roboLiberado) {
+
+    stopMotors();
+
+    return;
+
+  }
+
+
+  if (paradoPeloSensorBack) {
+
+    stopMotors();
+
+    return;
+
+  }
+
+
+  // ===================================================
+  // SENSOR TRASEIRO
+  // ===================================================
+
+  int BACK = digitalRead(IRBACK);
+
+
+  if (millis() - startTime >= delayIRBack) {
+
+
+    if (BACK == SENSOR_ATIVO) {
+
+
+      delay(delayParadaBack);
+
+
+      stopMotors();
+
+
+      paradoPeloSensorBack = true;
+
+
+      return;
+
+    }
+
+  }
+
+
+  // ===================================================
+  // LEITURA DA LINHA
+  // ===================================================
+
+  bool linhaEncontrada = false;
+
+
+  erro = lerErroLinha(linhaEncontrada);
+
+
+  // ===================================================
+  // CONTROLE
+  // ===================================================
+
+  if (linhaEncontrada) {
+
+    controlarLinha();
+
+  }
+
+  else {
+
+    procurarLinha();
+
+  }
+
+
+  delay(3);
+}
+
+
+// =====================================================
+// LEITURA DOS SENSORES
+// =====================================================
+
+float lerErroLinha(bool &linhaEncontrada) {
+
+
+  float somaPesos = 0;
+
+  int sensoresAtivos = 0;
+
+
+  // ===================================================
+  // LÊ TODOS OS SENSORES
+  // ===================================================
+
+  for (int i = 0; i < 5; i++) {
+
+
+    estadoSensores[i] =
+
+      (digitalRead(sensores[i]) == SENSOR_ATIVO);
+
+
+    if (estadoSensores[i]) {
+
+
+      somaPesos += pesos[i];
+
+
+      sensoresAtivos++;
+
+    }
+
+  }
+
+
+  // ===================================================
+  // LINHA ENCONTRADA
+  // ===================================================
+
+  if (sensoresAtivos > 0) {
+
+
+    linhaEncontrada = true;
+
+
+    float posicao =
+
+      somaPesos / sensoresAtivos;
+
+
+    // Guarda último lado conhecido
+
+    if (posicao > 0.15) {
+
+      ultimoErroValido = posicao;
+
+    }
+
+    else if (posicao < -0.15) {
+
+      ultimoErroValido = posicao;
+
+    }
+
+
+    return posicao;
+
+  }
+
+
+  // ===================================================
+  // PERDEU LINHA
+  // ===================================================
+
+  linhaEncontrada = false;
+
+
+  return ultimoErroValido;
+}
+
+
+// =====================================================
+// CONTROLE PRINCIPAL
+// =====================================================
+
+void controlarLinha() {
+
+
+  // ===================================================
+  // EXTREMA DIREITA
+  // ===================================================
+  //
+  // ○ ○ ○ ○ ●
+  //
+  // O robô precisa virar FORTE para direita.
+  //
+  // Esquerdo = frente forte
+  // Direito = ré
+  //
+
+  if (estadoSensores[4]) {
+
+
+    ultimoErroValido = 2.0;
+
+
+    integral = 0;
+
+
+    erroAnterior = erro;
+
+
+    setMotors(
+
+      strongCurveOuter,
+
+      -strongCurveInner
+
+    );
+
+
+    return;
+
+  }
+
+
+  // ===================================================
+  // EXTREMA ESQUERDA
+  // ===================================================
+  //
+  // ● ○ ○ ○ ○
+  //
+  // Esquerdo = ré
+  // Direito = frente forte
+  //
+
+  if (estadoSensores[0]) {
+
+
+    ultimoErroValido = -2.0;
+
+
+    integral = 0;
+
+
+    erroAnterior = erro;
+
+
+    setMotors(
+
+      -strongCurveInner,
+
+      strongCurveOuter
+
+    );
+
+
+    return;
+
+  }
+
+
+  // ===================================================
+  // CENTRO
+  // ===================================================
+  //
+  // Se o sensor central está sozinho ou praticamente
+  // centralizado, anda reto.
+  //
+
+  if (
+
+    estadoSensores[2]
+
+    &&
+
+    !estadoSensores[1]
+
+    &&
+
+    !estadoSensores[3]
+
+  ) {
+
+
+    integral = 0;
+
+
+    erroAnterior = 0;
+
+
+    setMotors(
+
+      baseSpeed,
+
+      baseSpeed
+
+    );
+
+
+    return;
+
+  }
+
+
+  // ===================================================
+  // RESTANTE
+  // ===================================================
+
+  aplicarPID();
+}
+
+
+// =====================================================
+// PID
+// =====================================================
+
+void aplicarPID() {
+
+
+  // =======================
+  // PROPORCIONAL
+  // =======================
+
+  float proporcional = erro;
+
+
+  // =======================
+  // INTEGRAL
+  // =======================
+
+  integral += erro;
+
+
+  integral = constrain(
+
+    integral,
+
+    -20,
+
+    20
+
+  );
+
+
+  // =======================
+  // DERIVATIVO
+  // =======================
+
+  float derivativo =
+
+    erro - erroAnterior;
+
+
+  // =======================
+  // CORREÇÃO
+  // =======================
+
+  float correcao =
+
+    (Kp * proporcional)
+
+    +
+
+    (Ki * integral)
+
+    +
+
+    (Kd * derivativo);
+
+
+  erroAnterior = erro;
+
+
+  // =======================
+  // MOTORES
+  // =======================
+
+  int motorEsq =
+
+    baseSpeed + correcao;
+
+
+  int motorDir =
+
+    baseSpeed - correcao;
+
+
+  // ===================================================
+  // PID NORMAL SEM RÉ
+  // ===================================================
+
+  motorEsq = constrain(
+
+    motorEsq,
+
+    0,
+
+    maxSpeed
+
+  );
+
+
+  motorDir = constrain(
+
+    motorDir,
+
+    0,
+
+    maxSpeed
+
+  );
+
+
+  setMotors(
+
+    motorEsq,
+
+    motorDir
+
+  );
+}
+
+
+// =====================================================
+// PROCURAR LINHA
+// =====================================================
+
+void procurarLinha() {
+
+
+  integral = 0;
+
+  erroAnterior = 0;
+
+
+  // ===================================================
+  // PERDEU PARA DIREITA
+  // ===================================================
+
+  if (ultimoErroValido > 0) {
+
+
+    // Continua fechando para direita
+    //
+    // NÃO PARA antes.
+    //
+    // Isso é importante para não matar
+    // o embalo da curva.
+
+    setMotors(
+
+      searchForward,
+
+      -searchReverse
+
+    );
+
+  }
+
+
+  // ===================================================
+  // PERDEU PARA ESQUERDA
+  // ===================================================
+
+  else if (ultimoErroValido < 0) {
+
+
+    setMotors(
+
+      -searchReverse,
+
+      searchForward
+
+    );
+
+  }
+
+
+  // ===================================================
+  // SEM HISTÓRICO
+  // ===================================================
+
+  else {
+
+
+    setMotors(
+
+      100,
+
+      100
+
+    );
+
+  }
+
+}
+
+
+// =====================================================
+// CONTROLE DOS MOTORES
+// =====================================================
+
+void setMotors(int velEsq, int velDir) {
+
+
+  velEsq = constrain(
+
+    velEsq,
+
+    -255,
+
+    255
+
+  );
+
+
+  velDir = constrain(
+
+    velDir,
+
+    -255,
+
+    255
+
+  );
+
+
+  // ===================================================
+  // MOTOR DIREITO
+  // ===================================================
+
+  if (velDir > 0) {
+
+
+    digitalWrite(IN1, LOW);
+
+    digitalWrite(IN2, HIGH);
+
+  }
+
+  else if (velDir < 0) {
+
+
+    digitalWrite(IN1, HIGH);
+
+    digitalWrite(IN2, LOW);
+
+  }
+
+  else {
+
+
+    digitalWrite(IN1, LOW);
+
+    digitalWrite(IN2, LOW);
+
+  }
+
+
+  // ===================================================
+  // MOTOR ESQUERDO
+  // ===================================================
+
+  if (velEsq > 0) {
+
+
+    digitalWrite(IN3, LOW);
+
+    digitalWrite(IN4, HIGH);
+
+  }
+
+  else if (velEsq < 0) {
+
+
+    digitalWrite(IN3, HIGH);
+
+    digitalWrite(IN4, LOW);
+
+  }
+
+  else {
+
+
+    digitalWrite(IN3, LOW);
+
+    digitalWrite(IN4, LOW);
+
+  }
+
+
+  // ===================================================
+  // PWM
+  // ===================================================
+
+  analogWrite(
+
+    ENA,
+
+    abs(velDir)
+
+  );
+
+
+  analogWrite(
+
+    ENB,
+
+    abs(velEsq)
+
+  );
+
+}
+
+
+// =====================================================
+// PARAR
+// =====================================================
+
+void stopMotors() {
+
+
+  digitalWrite(IN1, LOW);
+
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, LOW);
+
+  digitalWrite(IN4, LOW);
+
+
+  analogWrite(ENA, 0);
+
+  analogWrite(ENB, 0);
+
+}
